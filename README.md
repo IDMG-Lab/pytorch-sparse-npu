@@ -1,22 +1,9 @@
-[pypi-image]: https://badge.fury.io/py/torch-sparse.svg
-[pypi-url]: https://pypi.python.org/pypi/torch-sparse
-[testing-image]: https://github.com/rusty1s/pytorch_sparse/actions/workflows/testing.yml/badge.svg
-[testing-url]: https://github.com/rusty1s/pytorch_sparse/actions/workflows/testing.yml
-[linting-image]: https://github.com/rusty1s/pytorch_sparse/actions/workflows/linting.yml/badge.svg
-[linting-url]: https://github.com/rusty1s/pytorch_sparse/actions/workflows/linting.yml
-[coverage-image]: https://codecov.io/gh/rusty1s/pytorch_sparse/branch/master/graph/badge.svg
-[coverage-url]: https://codecov.io/github/rusty1s/pytorch_sparse?branch=master
 
-# PyTorch Sparse
+# PyTorch Sparse NPU
 
-[![PyPI Version][pypi-image]][pypi-url]
-[![Testing Status][testing-image]][testing-url]
-[![Linting Status][linting-image]][linting-url]
-[![Code Coverage][coverage-image]][coverage-url]
 
---------------------------------------------------------------------------------
 
-This package consists of a small extension library of optimized sparse matrix operations with autograd support.
+This package consists of a small extension library of optimized sparse matrix operations with autograd support on Ascend NPU.
 This package currently consists of the following methods:
 
 * **[Coalesce](#coalesce)**
@@ -24,299 +11,81 @@ This package currently consists of the following methods:
 * **[Sparse Dense Matrix Multiplication](#sparse-dense-matrix-multiplication)**
 * **[Sparse Sparse Matrix Multiplication](#sparse-sparse-matrix-multiplication)**
 
-All included operations work on varying data types and are implemented both for CPU and GPU.
+All included operations work on varying data types and are implemented both for CPU, GPU and Ascend NPU.
 To avoid the hazzle of creating [`torch.sparse_coo_tensor`](https://pytorch.org/docs/stable/torch.html?highlight=sparse_coo_tensor#torch.sparse_coo_tensor), this package defines operations on sparse tensors by simply passing `index` and `value` tensors as arguments ([with same shapes as defined in PyTorch](https://pytorch.org/docs/stable/sparse.html)).
-Note that only `value` comes with autograd support, as `index` is discrete and therefore not differentiable.
+Original repo: [torch_sparse](https://github.com/rusty1s/pytorch_sparse)
 
-## Installation
 
-### Binaries
+--------------------------------------------------------------------------------
 
-We provide pip wheels for all major OS/PyTorch/CUDA combinations, see [here](https://data.pyg.org/whl).
+# torch_sparse NPU 适配文档
 
-#### PyTorch 2.8
+## 1. 项目概述
 
-To install the binaries for PyTorch 2.8.0, simply run
+本项目是针对 `torch_sparse` 库的异构计算后端扩展，旨在使其能够高效运行在华为 **Ascend (昇腾) NPU** 硬件平台上。通过对接 **CANN (Compute Architecture for Neural Networks)** 软件栈，实现了稀疏张量算子在 NPU 上的分发与执行。
 
-```
-pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.8.0+${CUDA}.html
-```
+---
 
-where `${CUDA}` should be replaced by either `cpu`, `cu126`, `cu128`, or `cu129` depending on your PyTorch installation.
+## 2. 核心技术架构
 
-|             | `cpu` | `cu126` | `cu128` | `cu129` |
-|-------------|-------|---------|---------|---------|
-| **Linux**   | ✅    | ✅      | ✅      | ✅      |
-| **Windows** | ✅    | ✅      | ✅      | ✅      |
-| **macOS**   | ✅    |         |         |         |
+适配工作主要基于 PyTorch 的插件扩展机制，通过以下三个层级的修改实现后端解耦：
 
-#### PyTorch 2.7
+### 2.1 算子分发机制 (Dispatching)
 
-To install the binaries for PyTorch 2.7.0, simply run
+在 `csrc/` 核心代码层，将原本的二元分发（CPU/CUDA）升级为三元分发：
 
-```
-pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.7.0+${CUDA}.html
-```
+* **设备识别**：利用 `tensor.device().type()` 识别 `torch::kPrivateUse1` 标识（该标识由 `torch_npu` 注册给 NPU 设备）。
+* **静态路由**：在算子入口文件（如 `convert.cpp`, `spmm.cpp`）中增加 `else if (is_npu)` 逻辑，实现对 NPU 内核函数的路由转发。
 
-where `${CUDA}` should be replaced by either `cpu`, `cu118`, `cu126`, or `cu128` depending on your PyTorch installation.
+### 2.2 构建系统增强 (Build System)
 
-|             | `cpu` | `cu118` | `cu126` | `cu128` |
-|-------------|-------|---------|---------|---------|
-| **Linux**   | ✅    | ✅      | ✅      | ✅      |
-| **Windows** | ✅    | ✅      | ✅      | ✅      |
-| **macOS**   | ✅    |         |         |         |
+对 `setup.py` 进行了修改，使其具备 NPU 感知能力：
 
-#### PyTorch 2.6
+* **自动路径发现**：通过 `import torch_npu` 动态获取 CANN 软件栈在 Python 环境中的安装位置，自动提取 `include` 和 `lib` 路径。
+* **NpuExtension 适配**：引入 `torch_npu.utils.cpp_extension.NpuExtension`，相比标准的 `CppExtension`，它能自动注入 NPU 特有的编译宏（如 `WITH_NPU`）和链接库（如 `libascendcl.so`）。
 
-To install the binaries for PyTorch 2.6.0, simply run
+### 2.3 接口实现 (Interface Implementation)
 
-```
-pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.6.0+${CUDA}.html
-```
+建立了 `csrc/npu/` 目录结构，通过头文件解耦：
 
-where `${CUDA}` should be replaced by either `cpu`, `cu118`, `cu124`, or `cu126` depending on your PyTorch installation.
+* 实现了与 CPU/CUDA 版本完全对称的函数签名。
+* 在开发初期建立接口占位符，确保了整体库的可编译性与可链接性，各个算子可单独实现并编译为动态库链接到该库中。
 
-|             | `cpu` | `cu118` | `cu124` | `cu126` |
-|-------------|-------|---------|---------|---------|
-| **Linux**   | ✅    | ✅      | ✅      | ✅      |
-| **Windows** | ✅    | ✅      | ✅      | ✅      |
-| **macOS**   | ✅    |         |         |         |
+---
 
-**Note:** Binaries of older versions are also provided for PyTorch 1.4.0, PyTorch 1.5.0, PyTorch 1.6.0, PyTorch 1.7.0/1.7.1, PyTorch 1.8.0/1.8.1, PyTorch 1.9.0, PyTorch 1.10.0/1.10.1/1.10.2, PyTorch 1.11.0, PyTorch 1.12.0/1.12.1, PyTorch 1.13.0/1.13.1, PyTorch 2.0.0/2.0.1, PyTorch 2.1.0/2.1.1/2.1.2, PyTorch 2.2.0/2.2.1/2.2.2, PyTorch 2.3.0/2.3.1, PyTorch 2.4.0/2.4.1, and PyTorch 2.5.0/2.5.1 (following the same procedure).
-For older versions, you need to explicitly specify the latest supported version number or install via `pip install --no-index` in order to prevent a manual installation from source.
-You can look up the latest supported version number [here](https://data.pyg.org/whl).
+## 3. 后续开发计划
 
-### From source
+目前已完成“脚手架”搭建与分发链路的打通，后续工作将分为三个阶段：
 
-Ensure that at least PyTorch 1.7.0 is installed and verify that `cuda/bin` and `cuda/include` are in your `$PATH` and `$CPATH` respectively, *e.g.*:
+### 第一阶段：算子功能实现
 
-```
-$ python -c "import torch; print(torch.__version__)"
->>> 1.7.0
+* **ACL 调用**：优先调用 CANN 已有的高阶算子库（如 `aclnn` 接口）实现基础的 `spmm`、`spspmm`。
+* **Ascend C 开发**：针对 `ind2ptr`、`ptr2ind` 等细粒度索引变换算子，使用 Ascend C 编写高性能内核。
 
-$ echo $PATH
->>> /usr/local/cuda/bin:...
+### 第二阶段：算子性能优化
 
-$ echo $CPATH
->>> /usr/local/cuda/include:...
-```
+### 第三阶段：自动化测试与基准测试
 
-If you want to additionally build `torch-sparse` with METIS support, *e.g.* for partioning, please download and install the [METIS library](https://web.archive.org/web/20211119110155/http://glaros.dtc.umn.edu/gkhome/metis/metis/download) by following the instructions in the `Install.txt` file.
-Note that METIS needs to be installed with 64 bit `IDXTYPEWIDTH` by changing `include/metis.h`.
-Afterwards, set the environment variable `WITH_METIS=1`.
+* 编写基于 `pytest` 的对齐测试脚本，以 CPU 结果为标杆，验证 NPU 算子的数值精度。
+* 进行算子级 Profile 分析，针对 NPU 的异构计算单元优化稀疏矩阵乘法的计算密度。
 
-Then run:
+---
 
-```
-pip install torch-scatter torch-sparse
-```
+## 4. 编译与安装说明
 
-When running in a docker container without NVIDIA driver, PyTorch needs to evaluate the compute capabilities and may fail.
-In this case, ensure that the compute capabilities are set via `TORCH_CUDA_ARCH_LIST`, *e.g.*:
+**前提条件：**
 
-```
-export TORCH_CUDA_ARCH_LIST="6.0 6.1 7.2+PTX 7.5+PTX"
-```
+* 已安装 CANN Toolkit。
+* 已安装 `torch_npu` 插件。
 
-## Functions
+**执行编译：**
 
-### Coalesce
+```bash
+# 更新子模块
+git submodule update --init --recursive
 
-```
-torch_sparse.coalesce(index, value, m, n, op="add") -> (torch.LongTensor, torch.Tensor)
-```
+# 开启NPU编译
+export FORCE_NPU=1
+python setup.py install
 
-Row-wise sorts `index` and removes duplicate entries.
-Duplicate entries are removed by scattering them together.
-For scattering, any operation of [`torch_scatter`](https://github.com/rusty1s/pytorch_scatter) can be used.
-
-#### Parameters
-
-* **index** *(LongTensor)* - The index tensor of sparse matrix.
-* **value** *(Tensor)* - The value tensor of sparse matrix.
-* **m** *(int)* - The first dimension of sparse matrix.
-* **n** *(int)* - The second dimension of sparse matrix.
-* **op** *(string, optional)* - The scatter operation to use. (default: `"add"`)
-
-#### Returns
-
-* **index** *(LongTensor)* - The coalesced index tensor of sparse matrix.
-* **value** *(Tensor)* - The coalesced value tensor of sparse matrix.
-
-#### Example
-
-```python
-import torch
-from torch_sparse import coalesce
-
-index = torch.tensor([[1, 0, 1, 0, 2, 1],
-                      [0, 1, 1, 1, 0, 0]])
-value = torch.Tensor([[1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 7]])
-
-index, value = coalesce(index, value, m=3, n=2)
-```
-
-```
-print(index)
-tensor([[0, 1, 1, 2],
-        [1, 0, 1, 0]])
-print(value)
-tensor([[6.0, 8.0],
-        [7.0, 9.0],
-        [3.0, 4.0],
-        [5.0, 6.0]])
-```
-
-### Transpose
-
-```
-torch_sparse.transpose(index, value, m, n) -> (torch.LongTensor, torch.Tensor)
-```
-
-Transposes dimensions 0 and 1 of a sparse matrix.
-
-#### Parameters
-
-* **index** *(LongTensor)* - The index tensor of sparse matrix.
-* **value** *(Tensor)* - The value tensor of sparse matrix.
-* **m** *(int)* - The first dimension of sparse matrix.
-* **n** *(int)* - The second dimension of sparse matrix.
-* **coalesced** *(bool, optional)* - If set to `False`, will not coalesce the output. (default: `True`)
-
-#### Returns
-
-* **index** *(LongTensor)* - The transposed index tensor of sparse matrix.
-* **value** *(Tensor)* - The transposed value tensor of sparse matrix.
-
-#### Example
-
-```python
-import torch
-from torch_sparse import transpose
-
-index = torch.tensor([[1, 0, 1, 0, 2, 1],
-                      [0, 1, 1, 1, 0, 0]])
-value = torch.Tensor([[1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 7]])
-
-index, value = transpose(index, value, 3, 2)
-```
-
-```
-print(index)
-tensor([[0, 0, 1, 1],
-        [1, 2, 0, 1]])
-print(value)
-tensor([[7.0, 9.0],
-        [5.0, 6.0],
-        [6.0, 8.0],
-        [3.0, 4.0]])
-```
-
-### Sparse Dense Matrix Multiplication
-
-```
-torch_sparse.spmm(index, value, m, n, matrix) -> torch.Tensor
-```
-
-Matrix product of a sparse matrix with a dense matrix.
-
-#### Parameters
-
-* **index** *(LongTensor)* - The index tensor of sparse matrix.
-* **value** *(Tensor)* - The value tensor of sparse matrix.
-* **m** *(int)* - The first dimension of sparse matrix.
-* **n** *(int)* - The second dimension of sparse matrix.
-* **matrix** *(Tensor)* - The dense matrix.
-
-#### Returns
-
-* **out** *(Tensor)* - The dense output matrix.
-
-#### Example
-
-```python
-import torch
-from torch_sparse import spmm
-
-index = torch.tensor([[0, 0, 1, 2, 2],
-                      [0, 2, 1, 0, 1]])
-value = torch.Tensor([1, 2, 4, 1, 3])
-matrix = torch.Tensor([[1, 4], [2, 5], [3, 6]])
-
-out = spmm(index, value, 3, 3, matrix)
-```
-
-```
-print(out)
-tensor([[7.0, 16.0],
-        [8.0, 20.0],
-        [7.0, 19.0]])
-```
-
-### Sparse Sparse Matrix Multiplication
-
-```
-torch_sparse.spspmm(indexA, valueA, indexB, valueB, m, k, n) -> (torch.LongTensor, torch.Tensor)
-```
-
-Matrix product of two sparse tensors.
-Both input sparse matrices need to be **coalesced** (use the `coalesced` attribute to force).
-
-#### Parameters
-
-* **indexA** *(LongTensor)* - The index tensor of first sparse matrix.
-* **valueA** *(Tensor)* - The value tensor of first sparse matrix.
-* **indexB** *(LongTensor)* - The index tensor of second sparse matrix.
-* **valueB** *(Tensor)* - The value tensor of second sparse matrix.
-* **m** *(int)* - The first dimension of first sparse matrix.
-* **k** *(int)* - The second dimension of first sparse matrix and first dimension of second sparse matrix.
-* **n** *(int)* - The second dimension of second sparse matrix.
-* **coalesced** *(bool, optional)*: If set to `True`, will coalesce both input sparse matrices. (default: `False`)
-
-#### Returns
-
-* **index** *(LongTensor)* - The output index tensor of sparse matrix.
-* **value** *(Tensor)* - The output value tensor of sparse matrix.
-
-#### Example
-
-```python
-import torch
-from torch_sparse import spspmm
-
-indexA = torch.tensor([[0, 0, 1, 2, 2], [1, 2, 0, 0, 1]])
-valueA = torch.Tensor([1, 2, 3, 4, 5])
-
-indexB = torch.tensor([[0, 2], [1, 0]])
-valueB = torch.Tensor([2, 4])
-
-indexC, valueC = spspmm(indexA, valueA, indexB, valueB, 3, 3, 2)
-```
-
-```
-print(indexC)
-tensor([[0, 1, 2],
-        [0, 1, 1]])
-print(valueC)
-tensor([8.0, 6.0, 8.0])
-```
-
-## Running tests
-
-```
-pytest
-```
-
-## C++ API
-
-`torch-sparse` also offers a C++ API that contains C++ equivalent of python models.
-For this, we need to add `TorchLib` to the `-DCMAKE_PREFIX_PATH` (run `import torch; print(torch.utils.cmake_prefix_path)` to obtain it).
-
-```
-mkdir build
-cd build
-# Add -DWITH_CUDA=on support for CUDA support
-cmake -DCMAKE_PREFIX_PATH="..." ..
-make
-make install
 ```
