@@ -9,6 +9,11 @@
 #include "cuda/diag_cuda.h"
 #endif
 
+#ifdef WITH_NPU
+#include "npu/diag_npu.h"
+#endif
+#include "npu_utils.h"
+
 #ifdef _WIN32
 #ifdef WITH_PYTHON
 #ifdef WITH_CUDA
@@ -26,6 +31,12 @@ SPARSE_API torch::Tensor non_diag_mask(torch::Tensor row, torch::Tensor col, int
     return non_diag_mask_cuda(row, col, M, N, k);
 #else
     AT_ERROR("Not compiled with CUDA support");
+#endif
+  } else if (is_npu(row)){
+#ifdef WITH_NPU
+    return non_diag_mask_npu(row, col, M, N, k);
+#else
+    AT_ERROR("Not compiled with NPU support");
 #endif
   } else {
     return non_diag_mask_cpu(row, col, M, N, k);

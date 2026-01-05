@@ -9,6 +9,11 @@
 #include "cuda/rw_cuda.h"
 #endif
 
+#ifdef WITH_NPU
+#include "npu/rw_npu.h"
+#endif
+#include "npu_utils.h"
+
 #ifdef _WIN32
 #ifdef WITH_PYTHON
 #ifdef WITH_CUDA
@@ -26,6 +31,12 @@ SPARSE_API torch::Tensor random_walk(torch::Tensor rowptr, torch::Tensor col,
     return random_walk_cuda(rowptr, col, start, walk_length);
 #else
     AT_ERROR("Not compiled with CUDA support");
+#endif
+  } else if (is_npu(rowptr)){
+#ifdef WITH_NPU
+    return random_walk_npu(rowptr, col, start, walk_length);
+#else
+    AT_ERROR("Not compiled with NPU support");
 #endif
   } else {
     return random_walk_cpu(rowptr, col, start, walk_length);

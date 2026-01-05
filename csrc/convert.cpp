@@ -9,6 +9,11 @@
 #include "cuda/convert_cuda.h"
 #endif
 
+#ifdef WITH_NPU
+#include "npu/convert_npu.h"
+#endif
+#include "npu_utils.h"
+
 #ifdef _WIN32
 #ifdef WITH_PYTHON
 #ifdef WITH_CUDA
@@ -26,6 +31,12 @@ SPARSE_API torch::Tensor ind2ptr(torch::Tensor ind, int64_t M) {
 #else
     AT_ERROR("Not compiled with CUDA support");
 #endif
+  } else if (is_npu(ind)){
+#ifdef WITH_NPU
+    return ind2ptr_npu(ind, M);
+#else
+    AT_ERROR("Not compiled with NPU support");
+#endif
   } else {
     return ind2ptr_cpu(ind, M);
   }
@@ -37,6 +48,12 @@ SPARSE_API torch::Tensor ptr2ind(torch::Tensor ptr, int64_t E) {
     return ptr2ind_cuda(ptr, E);
 #else
     AT_ERROR("Not compiled with CUDA support");
+#endif
+  } else if (is_npu(ptr)){
+#ifdef WITH_NPU
+    return ptr2ind_npu(ptr, E);
+#else
+    AT_ERROR("Not compiled with NPU support");
 #endif
   } else {
     return ptr2ind_cpu(ptr, E);

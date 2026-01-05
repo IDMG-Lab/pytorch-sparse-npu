@@ -15,6 +15,26 @@ from torch.utils.cpp_extension import (
     CUDAExtension,
 )
 
+import torch_npu
+from torch_npu.utils.cpp_extension import NpuExtension
+
+PYTORCH_NPU_INSTALL_PATH = os.path.dirname(os.path.abspath(torch_npu.__file__))
+
+WITH_NPU = False
+if torch_npu.npu.is_available():
+    WITH_NPU = True
+
+# exts = []
+# ext1 = NpuExtension(
+#     name="custom_ops_lib",
+#     # 如果还有其他cpp文件参与编译，需要在这里添加
+#     sources=["./extension/custom_op.cpp"],
+#     extra_compile_args = [
+#         '-I' + os.path.join(PYTORCH_NPU_INSTALL_PATH, "include/third_party/acl/inc"),
+#     ],
+# )
+# exts.append(ext1)
+
 __version__ = '0.6.18'
 URL = 'https://github.com/rusty1s/pytorch_sparse'
 
@@ -22,6 +42,7 @@ WITH_CUDA = False
 if torch.cuda.is_available():
     WITH_CUDA = CUDA_HOME is not None or torch.version.hip
 suffices = ['cpu', 'cuda'] if WITH_CUDA else ['cpu']
+if WITH_NPU: suffices.append('npu')
 if os.getenv('FORCE_CUDA', '0') == '1':
     suffices = ['cuda', 'cpu']
 if os.getenv('FORCE_ONLY_CUDA', '0') == '1':
@@ -101,6 +122,9 @@ def get_extensions():
                 nvcc_flags += ['--expt-relaxed-constexpr']
             extra_compile_args['nvcc'] = nvcc_flags
 
+        if suffix == 'npu':
+            define_macros += [('WITH_NPU', None)]
+
         name = main.split(os.sep)[-1][:-4]
         sources = [main]
 
@@ -112,9 +136,18 @@ def get_extensions():
         if suffix == 'cuda' and osp.exists(path):
             sources += [path]
 
+        path = osp.join(extensions_dir, 'npu', f'{name}_npu.cpp')
+        if suffix == 'npu' and osp.exists(path):
+            sources += [path]
+
         phmap_dir = osp.abspath("third_party/parallel-hashmap")
 
-        Extension = CppExtension if suffix == 'cpu' else CUDAExtension
+        if suffix == 'npu':
+            # 如果安装了 torch_npu，使用其提供的 NpuExtension 以便自动处理依赖
+            from torch_npu.utils.cpp_extension import NpuExtension
+            Extension = NpuExtension
+        else:
+            Extension = CppExtension if suffix == 'cpu' else CUDAExtension
         extension = Extension(
             f'torch_sparse._{name}_{suffix}',
             sources,
