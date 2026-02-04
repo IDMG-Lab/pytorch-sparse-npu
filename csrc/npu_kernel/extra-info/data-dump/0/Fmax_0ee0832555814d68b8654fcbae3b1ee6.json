@@ -1,0 +1,94 @@
+{
+ "binFileName": "Fmax_0ee0832555814d68b8654fcbae3b1ee6",
+ "binFileSuffix": ".o",
+ "blockDim": -1,
+ "coreType": "VectorCore",
+ "core_type": "AIV",
+ "intercoreSync": 0,
+ "kernelName": "Fmax_0ee0832555814d68b8654fcbae3b1ee6",
+ "magic": "RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+ "memoryStamping": [],
+ "opParaSize": 80,
+ "parameters": [
+  null,
+  null,
+  null,
+  null
+ ],
+ "sha256": "c3fc20f054056cd936a23714bf0b866aebed20f54f24e0313b980c7625b9c03b",
+ "workspace": {
+  "num": 1,
+  "size": [
+   -1
+  ],
+  "type": [
+   0
+  ]
+ },
+ "kernelList": [
+  {
+   "kernelName": "Fmax_0ee0832555814d68b8654fcbae3b1ee6_1"
+  },
+  {
+   "kernelName": "Fmax_0ee0832555814d68b8654fcbae3b1ee6_2"
+  }
+ ],
+ "optionalInputMode": "gen_placeholder",
+ "optionalOutputMode": "gen_placeholder",
+ "supportSuperKernel": 1,
+ "compileInfo": {},
+ "supportInfo": {
+  "implMode": "high_performance",
+  "int64Mode": false,
+  "simplifiedKeyMode": 0,
+  "simplifiedKey": [
+   "Fmax/d=0,p=1/9,2/9,2/9,2",
+   "Fmax/d=0,p=0/9,2/9,2/9,2",
+   "Fmax/d=1,p=1/9,2/9,2/9,2",
+   "Fmax/d=1,p=0/9,2/9,2/9,2"
+  ],
+  "optionalInputMode": "gen_placeholder",
+  "optionalOutputMode": "gen_placeholder",
+  "staticKey": "97b84bbd17d95b59bfe092e19032c4ad146194773b10b3da61ec319748b71d78,404d0b7a58ef287687a3d011e31ac4a11b1dabab81260be2655418ec1f2a7430",
+  "inputs": [
+   {
+    "name": "x",
+    "index": 0,
+    "dtype": "int64",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   },
+   {
+    "name": "y",
+    "index": 1,
+    "dtype": "int64",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "z",
+    "index": 0,
+    "dtype": "int64",
+    "format": "ND",
+    "paramType": "required",
+    "shape": [
+     -2
+    ],
+    "format_match_mode": "FormatAgnostic"
+   }
+  ],
+  "opMode": "dynamic",
+  "deterministic": "ignore"
+ },
+ "filePath": "ascend910b/fmax/Fmax_0ee0832555814d68b8654fcbae3b1ee6.json"
+}

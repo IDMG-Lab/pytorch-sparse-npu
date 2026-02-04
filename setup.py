@@ -23,6 +23,7 @@ PYTORCH_NPU_INSTALL_PATH = os.path.dirname(os.path.abspath(torch_npu.__file__))
 WITH_NPU = False
 if torch_npu.npu.is_available():
     WITH_NPU = True
+    print('WITH_NPU = True')
 
 # exts = []
 # ext1 = NpuExtension(
