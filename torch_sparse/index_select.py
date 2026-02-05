@@ -4,6 +4,7 @@ import torch
 from torch_scatter import gather_csr
 from torch_sparse.storage import SparseStorage, get_layout
 from torch_sparse.tensor import SparseTensor
+from torch_npu import npu_gather_sparse_index as npu_index
 
 
 def index_select(src: SparseTensor, dim: int,
@@ -15,21 +16,26 @@ def index_select(src: SparseTensor, dim: int,
         old_rowptr, col, value = src.csr()
         rowcount = src.storage.rowcount()
 
-        rowcount = rowcount[idx]
+        # rowcount = rowcount[idx]
+        rowcount = npu_index(rowcount, idx)
 
         rowptr = col.new_zeros(idx.size(0) + 1)
         torch.cumsum(rowcount, dim=0, out=rowptr[1:])
 
-        row = torch.arange(idx.size(0),
-                           device=col.device).repeat_interleave(rowcount)
+        # row = torch.arange(idx.size(0),
+        #                    device=col.device).repeat_interleave(rowcount)
+        a = torch.arange(idx.size(0), device=col.device)
+        row = torch.repeat_interleave(a, rowcount, dim=0)
 
         perm = torch.arange(row.size(0), device=row.device)
         perm += gather_csr(old_rowptr[idx] - rowptr[:-1], rowptr)
 
-        col = col[perm]
+        # col = col[perm]
+        col = npu_index(col, perm)
 
         if value is not None:
-            value = value[perm]
+            # value = value[perm]
+            value = npu_index(value,perm)
 
         sparse_sizes = (idx.size(0), src.sparse_size(1))
 
@@ -66,7 +72,7 @@ def index_select(src: SparseTensor, dim: int,
         storage = SparseStorage(row=row, rowptr=None, col=col, value=value,
                                 sparse_sizes=sparse_sizes, rowcount=None,
                                 colptr=colptr, colcount=colcount, csr2csc=None,
-                                csc2csr=csc2csr, is_sorted=True)
+                                csc2csr=csc2csr, is_sorted=True,trust_data=True)
         return src.from_storage(storage)
 
     else:
