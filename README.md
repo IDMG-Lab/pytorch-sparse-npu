@@ -87,5 +87,6 @@ git submodule update --init --recursive
 # 开启NPU编译
 export FORCE_NPU=1
 python setup.py install
-
+cd csrc/npu/impl
+bash run.sh
 ```

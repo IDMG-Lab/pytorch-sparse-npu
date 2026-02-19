@@ -18,8 +18,9 @@ script_path=$(realpath $(dirname $0))
 
 BUILD_DIR="build_out"
 HOST_NATIVE_DIR="host_native_tiling"
-mkdir -p build_out
 rm -rf build_out/*
+mkdir -p build_out
+
 
 opts=$(python3 $script_path/cmake/util/preset_parse.py $script_path/CMakePresets.json)
 ENABLE_CROSS="-DENABLE_CROSS_COMPILE=True"

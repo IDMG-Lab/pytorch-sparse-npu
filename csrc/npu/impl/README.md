@@ -1,18 +1,28 @@
 ## 如何加入一个算子
 
-  在 `csrc/ops_.../` 下新建对应算子目录，例如 `op_name = a`：
+  在 `impl` 中对应的算子目录添加对应的算子文件，例如 `op_name = a`：  
+  `impl`中的算子目前都是放在scatter和sparse中，后续可以新建pyg的其他库所需算子目录  
+  其他是编译所需文件，与算子实现无关
 
-1. 新建目录结构  
-   - `csrc/ops_.../a/op_host`  
-   - `csrc/ops_.../a/op_kernel`
+1. 新建自定义算子结构  
+   - `impl/scatter/a/op_host`  
+   - `impl/scatter/a/op_kernel`
 
 2. 在上述目录中添加对应实现代码  
    - Host 侧实现放在 `op_host`  
    - Kernel 侧实现放在 `op_kernel`
 
-3. 创建 `csrc/ops_.../a/CMakeLists.txt`  在其中添加：
+3. 创建 `impl/scatter/a/CMakeLists.txt`  在其中添加：
    `register_operator(a)`
-
+```
+最终实现的内容如下：
+- impl/ 
+   - scatter/
+      - a/
+         - op_host/
+         - op_kernel/
+         - CMakeLists.txt 
+```
 ## 注意事项
 
 1. **确认实际生成的 ACL 算子名称**  
