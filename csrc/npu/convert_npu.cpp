@@ -19,6 +19,6 @@ torch::Tensor ptr2ind_npu(torch::Tensor ptr, int64_t E) {
   auto ptr_data = ptr.data_ptr<int64_t>();
   auto out_data = out.data_ptr<int64_t>();
   auto ptr_size = (int64_t)ptr.numel() - 1;
-  EXEC_NPU_CMD(aclnnPtr2ind, ptr, E, ptr_size, out);
+  EXEC_NPU_CMD(aclnnPtr2ind, ptr, E,out);
   return out;
 }
