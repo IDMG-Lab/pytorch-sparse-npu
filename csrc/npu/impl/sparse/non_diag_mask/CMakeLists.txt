@@ -8,4 +8,4 @@ cmake_minimum_required(VERSION 3.16)
 # This makes per-operator CMakeLists.txt *functional* (not just comments), and
 # keeps the repository layout clean: each operator owns its host/kernel sources.
 
-register_operator(ptr2ind)
+register_operator(non_diag_mask)

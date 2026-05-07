@@ -4,8 +4,6 @@
 
 namespace optiling {
 
-const uint32_t TILE_LENGTH = 128;
-
 static ge::graphStatus TilingFunc(gert::TilingContext* context)
 {
     Ptr2indTilingData tiling;
@@ -17,18 +15,17 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     uint32_t numSegments = ptr_shape->GetStorageShape().GetShapeSize() - 1;
 
     // ====================== 自动选择核数 ======================
-    uint32_t BLOCK_DIM = 1; // 小数据直接用 1 核，避免越界
-    if (totalE > 128) {
-        BLOCK_DIM = 1;
-    }
+    // 真实大图数据量极大，直接打满 NPU 核心 (910B 通常为 40 核)
+    uint32_t BLOCK_DIM = (totalE > 4096) ? 40 : 1; 
 
-    uint32_t blockSize = (totalE + BLOCK_DIM - 1) / BLOCK_DIM;
-    uint32_t tileNum = (blockSize + TILE_LENGTH - 1) / TILE_LENGTH;
+    // 计算每个 Core 负责的长度，并强制向上对齐到 4 的倍数 (32 Byte)
+    uint32_t outLengthPerCore = (totalE + BLOCK_DIM - 1) / BLOCK_DIM;
+    outLengthPerCore = (outLengthPerCore + 3) / 4 * 4; 
 
     tiling.set_totalE(totalE);
     tiling.set_numSegments(numSegments);
-    tiling.set_blockSize(blockSize);
-    tiling.set_tileNum(tileNum);
+    tiling.set_coreNum(BLOCK_DIM);
+    tiling.set_outLengthPerCore(outLengthPerCore);
 
     context->SetBlockDim(BLOCK_DIM);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
