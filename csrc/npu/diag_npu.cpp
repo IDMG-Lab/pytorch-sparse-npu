@@ -9,17 +9,11 @@ torch::Tensor non_diag_mask_npu(torch::Tensor row, torch::Tensor col,
 
   auto E = row.size(0);
   auto num_diag = k < 0 ? std::min(M + k, N) : std::min(M, N - k);
-
-  auto row_data = row.data_ptr<int64_t>();
-  auto col_data = col.data_ptr<int64_t>();
-
-  auto mask = torch::zeros({E + num_diag}, row.options().dtype(torch::kBool));
-  auto mask_data = mask.data_ptr<bool>();
+  auto mask = torch::zeros({E + num_diag}, row.options().dtype(torch::kInt8));
 
   if (E == 0)
     return mask;
 
-  EXEC_NPU_CMD(aclnnNoneDiagMask, row, col, N, k, num_diag, E, mask);
-
+  EXEC_NPU_CMD(aclnnNonDiagMask, row, col, M, N, k, mask);
   return mask;
 }

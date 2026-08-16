@@ -2,188 +2,583 @@
 
 using namespace AscendC;
 
-constexpr int32_t BUFFER_NUM = 2;
+// ============================================================
+// 配置
+// ============================================================
+
+// 不再需要双缓冲。
+// 当前实现 CopyIn -> Compute 是串行消费，双缓冲只会额外占 UB。
+constexpr int32_t BUFFER_NUM = 1;
+
+// 每次从 GM 搬入 4096 个 int64。
+// 每个输入队列占 4096 * 8 = 32 KB。
+// row + col 合计约 64 KB UB。
+constexpr uint32_t TILE_DATA_NUM = 4096;
+
+// Scalar 访问 GM 时以 64B CacheLine 为基本单位。
+// 多核输出区间必须以 64B 为边界切分，避免两个 Core
+// 修改同一个 CacheLine。
+constexpr uint32_t CACHE_LINE_BYTES = 64;
+
 
 class KernelNonDiagMask {
 public:
     __aicore__ inline KernelNonDiagMask() {}
-    __aicore__ inline void Init(GM_ADDR row, GM_ADDR col, GM_ADDR mask,
-                                uint32_t start_tgt, uint32_t end_tgt,
-                                uint32_t min_idx, uint32_t coreProcessLength,
-                                uint32_t tileNum, uint32_t tileDataNum, uint32_t tailDataNum,
-                                int64_t M, int64_t N, int64_t k, int64_t num_diag,
-                                uint32_t totalLength)
+
+    __aicore__ inline void Init(
+        GM_ADDR row,
+        GM_ADDR col,
+        GM_ADDR mask,
+
+        uint32_t startTgt,
+        uint32_t endTgt,
+
+        uint32_t minIdx,
+        uint32_t coreProcessLength,
+
+        uint32_t tileNum,
+        uint32_t tailDataNum,
+
+        int64_t M,
+        int64_t N,
+        int64_t k,
+        int64_t numDiag,
+
+        uint32_t totalLength,
+        uint32_t outTotalLen)
     {
-        this->start_tgt = start_tgt;
-        this->end_tgt = end_tgt;
-        this->min_idx = min_idx;
+        this->startTgt = startTgt;
+        this->endTgt = endTgt;
+
+        this->minIdx = minIdx;
+        this->coreProcessLength = coreProcessLength;
+
         this->tileNum = tileNum;
-        this->tileDataNum = tileDataNum;
         this->tailDataNum = tailDataNum;
+
         this->M = M;
         this->N = N;
         this->k = k;
-        this->num_diag = num_diag;
+        this->numDiag = numDiag;
+
         this->totalLength = totalLength;
+        this->outTotalLen = outTotalLen;
 
-        // 【修复 1】：计算当前 Core 负责的输出长度
-        // DataCopy 需要 32B 对齐
-        this->align_32_len = (end_tgt - start_tgt + 31) / 32 * 32;
-        // Duplicate 向量指令 (int8) 建议 256B 对齐
-        this->align_256_len = (align_32_len + 255) / 256 * 256;
+        // ====================================================
+        // row / col 使用 uint8_t 视图。
+        //
+        // 原因：
+        // DataCopy 对 int64 搬运要求按照 32B，即 4 个 int64 对齐。
+        // 最后一个 tile 如果不足 4 个元素，直接向上对齐可能访问
+        // row / col Tensor 尾部之外。
+        //
+        // 将数据看成 byte，再通过 DataCopyPad 精确搬运
+        // curProcessDataNum * sizeof(int64_t) 个字节。
+        // ====================================================
 
-        rowGm.SetGlobalBuffer((__gm__ int64_t*)row + min_idx);
-        colGm.SetGlobalBuffer((__gm__ int64_t*)col + min_idx);
-        // maskGm 偏移到当前 Core 的起始位置
-        maskGm.SetGlobalBuffer((__gm__ int8_t*)mask + start_tgt);
+        rowGm.SetGlobalBuffer(
+            reinterpret_cast<__gm__ uint8_t*>(row),
+            totalLength * sizeof(int64_t));
 
-        // 初始化 Pipe 缓冲区
-        pipe.InitBuffer(inQueueRow, BUFFER_NUM, tileDataNum * sizeof(int64_t));
-        pipe.InitBuffer(inQueueCol, BUFFER_NUM, tileDataNum * sizeof(int64_t));
-        // 分配输出掩码的 Local Buffer
-        pipe.InitBuffer(maskBuf, this->align_256_len * sizeof(int8_t));
+        colGm.SetGlobalBuffer(
+            reinterpret_cast<__gm__ uint8_t*>(col),
+            totalLength * sizeof(int64_t));
+
+        // mask 的单位本身就是 byte。
+        maskGm.SetGlobalBuffer(
+            reinterpret_cast<__gm__ int8_t*>(mask),
+            outTotalLen);
+
+        // ====================================================
+        // UB 只保留两个固定大小的输入 Tile。
+        //
+        // 不再分配：
+        //
+        //     maskBuf = endTgt - startTgt
+        //
+        // 因此 UB 使用量与 E / M / N 无关。
+        // ====================================================
+
+        pipe.InitBuffer(
+            inQueueRow,
+            BUFFER_NUM,
+            TILE_DATA_NUM * sizeof(int64_t));
+
+        pipe.InitBuffer(
+            inQueueCol,
+            BUFFER_NUM,
+            TILE_DATA_NUM * sizeof(int64_t));
     }
+
 
     __aicore__ inline void Process()
     {
-        if (this->align_32_len == 0) return;
-
-        // 【修复 2】：在 UB 中申请 Local Tensor，并使用向量指令清零
-        LocalTensor<int8_t> maskLocal = maskBuf.Get<int8_t>();
-        //Duplicate(maskLocal, (int8_t)0, this->align_256_len);
-        // ====================== 核心修改：类型强转+Duplicate清零 ======================
-        // 1. 将 int8_t 张量重新解释为 uint16_t（Duplicate支持的类型）
-        auto maskLocalCast = maskLocal.ReinterpretCast<uint16_t>();
-        // 2. 计算uint16_t元素个数（256字节对齐，必然整除，安全无余数）
-        uint32_t fillCount = this->align_256_len / sizeof(uint16_t);
-        // 3. 调用支持的向量指令清零（全0内存布局，int8_t/uint16_t完全一致）
-        Duplicate(maskLocalCast, (uint16_t)0, fillCount);
-        // ==========================================================================
-
-        for (uint32_t i = 0; i < this->tileNum; i++) {
-            uint32_t curProcessDataNum = (i == this->tileNum - 1) ? this->tailDataNum : this->tileDataNum;
-            CopyIn(i, curProcessDataNum);
-            // 将 maskLocal 传给 Compute
-            Compute(i, curProcessDataNum, maskLocal);
+        if (coreProcessLength == 0) {
+            return;
         }
 
-        // 【修复 3】：全部计算完毕后，通过 VEC->GM 的搬运引擎一次性写回
-        // 这里必须用 align_32_len，防止 256B 尾部对齐写穿界覆盖到下一个 Core 的数据！
-        DataCopy(maskGm, maskLocal, this->align_32_len);
+        for (uint32_t progress = 0; progress < tileNum; ++progress) {
+
+            uint32_t curProcessDataNum =
+                (progress == tileNum - 1)
+                    ? tailDataNum
+                    : TILE_DATA_NUM;
+
+            CopyIn(progress, curProcessDataNum);
+
+            Compute(progress, curProcessDataNum);
+        }
+
+        // ====================================================
+        // maskGm.SetValue() 属于 Scalar -> GM 写操作。
+        //
+        // SetValue 首先修改当前 AI Core 的 Data Cache，
+        // 所以 Kernel 结束前必须刷新 Data Cache，使修改真正写回 GM。
+        //
+        // 每个 Core 只写自己独占的 64B 对齐输出区间，因此不会产生
+        // 不同 Core 对同一个 CacheLine 的写回覆盖。
+        // ====================================================
+
+        DataCacheCleanAndInvalid<
+            int8_t,
+            CacheLine::ENTIRE_DATA_CACHE,
+            DcciDst::CACHELINE_OUT>(maskGm);
     }
+
 
 private:
-    __aicore__ inline void CopyIn(uint32_t progress, uint32_t curProcessDataNum)
-    {
-        LocalTensor<int64_t> rowLocal = inQueueRow.AllocTensor<int64_t>();
-        LocalTensor<int64_t> colLocal = inQueueCol.AllocTensor<int64_t>();
-        
-        uint32_t alignedDataNum = (curProcessDataNum + 3) / 4 * 4;
 
-        DataCopy(rowLocal, rowGm[progress * this->tileDataNum], alignedDataNum);
-        DataCopy(colLocal, colGm[progress * this->tileDataNum], alignedDataNum);
-        
-        inQueueRow.EnQue(rowLocal);
-        inQueueCol.EnQue(colLocal);
+    // ========================================================
+    // CopyIn
+    // ========================================================
+
+    __aicore__ inline void CopyIn(
+        uint32_t progress,
+        uint32_t curProcessDataNum)
+    {
+        LocalTensor<uint8_t> rowLocalByte =
+            inQueueRow.AllocTensor<uint8_t>();
+
+        LocalTensor<uint8_t> colLocalByte =
+            inQueueCol.AllocTensor<uint8_t>();
+
+        // 当前 tile 在原始 row/col 中的起始元素位置。
+        uint32_t globalElementOffset =
+            this->minIdx + progress * TILE_DATA_NUM;
+
+        // 转换成 byte offset。
+        uint64_t globalByteOffset =
+            static_cast<uint64_t>(globalElementOffset) *
+            sizeof(int64_t);
+
+        // 实际需要搬运的字节数。
+        uint32_t copyBytes =
+            curProcessDataNum * sizeof(int64_t);
+
+        // ====================================================
+        // DataCopyPad 支持非 32B 对齐搬运。
+        //
+        // blockCount = 1
+        // blockLen   = copyBytes，单位 Byte
+        // srcStride  = 0
+        // dstStride  = 0
+        // ====================================================
+
+        DataCopyExtParams copyParams{
+            1,
+            copyBytes,
+            0,
+            0,
+            0
+        };
+
+        // 不主动增加 left/right padding。
+        // DataCopyPad 会自动处理 Local 侧的数据块对齐。
+        DataCopyPadExtParams<uint8_t> padParams{
+            true,
+            0,
+            0,
+            0
+        };
+
+        DataCopyPad(
+            rowLocalByte,
+            rowGm[globalByteOffset],
+            copyParams,
+            padParams);
+
+        DataCopyPad(
+            colLocalByte,
+            colGm[globalByteOffset],
+            copyParams,
+            padParams);
+
+        inQueueRow.EnQue(rowLocalByte);
+        inQueueCol.EnQue(colLocalByte);
     }
 
-    __aicore__ inline void Compute(uint32_t progress, uint32_t curProcessDataNum, LocalTensor<int8_t>& maskLocal)
-    {
-        LocalTensor<int64_t> rowLocal = inQueueRow.DeQue<int64_t>();
-        LocalTensor<int64_t> colLocal = inQueueCol.DeQue<int64_t>();
 
-        // 维持同步屏障，确保 VECIN (MTE2) 数据被 Scalar 读取前就绪
+    // ========================================================
+    // Compute
+    // ========================================================
+
+    __aicore__ inline void Compute(
+        uint32_t progress,
+        uint32_t curProcessDataNum)
+    {
+        LocalTensor<uint8_t> rowLocalByte =
+            inQueueRow.DeQue<uint8_t>();
+
+        LocalTensor<uint8_t> colLocalByte =
+            inQueueCol.DeQue<uint8_t>();
+
+        // byte Tensor 重新解释成 int64 Tensor。
+        LocalTensor<int64_t> rowLocal =
+            rowLocalByte.ReinterpretCast<int64_t>();
+
+        LocalTensor<int64_t> colLocal =
+            colLocalByte.ReinterpretCast<int64_t>();
+
+        // 等待 MTE2 -> UB 数据就绪。
         PipeBarrier<PIPE_ALL>();
 
-        uint32_t base_idx = this->min_idx + progress * this->tileDataNum;
-        
-        for (uint32_t i = 0; i < curProcessDataNum; i++) {
-            uint32_t idx = base_idx + i;
-            if (idx >= this->totalLength) break;
+        uint32_t baseIdx =
+            this->minIdx + progress * TILE_DATA_NUM;
+
+
+        for (uint32_t i = 0;
+             i < curProcessDataNum;
+             ++i) {
+
+            uint32_t idx = baseIdx + i;
+
+            if (idx >= this->totalLength) {
+                break;
+            }
 
             int64_t r = rowLocal.GetValue(i);
             int64_t c = colLocal.GetValue(i);
-            int64_t target_idx_long = -1; // 初始化为一个无效索引
+
+            int64_t targetIdx = -1;
+
+
+            // =================================================
+            // 完全保持 pytorch_sparse non_diag_mask 的
+            // CUDA reference 逻辑。
+            // =================================================
 
             if (this->k < 0) {
-                if (r + this->k < 0) target_idx_long = (int64_t)idx;
-                else if (r + this->k >= this->N) target_idx_long = (int64_t)idx + this->num_diag;
-                else if (r + this->k > c) target_idx_long = (int64_t)idx + (r + this->k);
-                else if (r + this->k < c) target_idx_long = (int64_t)idx + (r + this->k) + 1; // 显式判断 <
-                // 如果 r + k == c，target_idx_long 保持为 -1
+
+                if (r + this->k < 0) {
+
+                    targetIdx =
+                        static_cast<int64_t>(idx);
+
+                } else if (r + this->k >= this->N) {
+
+                    targetIdx =
+                        static_cast<int64_t>(idx)
+                        + this->numDiag;
+
+                } else if (r + this->k > c) {
+
+                    targetIdx =
+                        static_cast<int64_t>(idx)
+                        + r
+                        + this->k;
+
+                } else if (r + this->k < c) {
+
+                    targetIdx =
+                        static_cast<int64_t>(idx)
+                        + r
+                        + this->k
+                        + 1;
+                }
+
+                // r + k == c：
+                // 当前 COO 元素本身位于目标对角线上，
+                // 不写 mask，保持 0。
+
             } else {
-                if (r + this->k >= this->N) target_idx_long = (int64_t)idx + this->num_diag;
-                else if (r + this->k > c) target_idx_long = (int64_t)idx + r;
-                else if (r + this->k < c) target_idx_long = (int64_t)idx + r + 1; // 显式判断 <
-                // 如果 r + k == c，target_idx_long 保持为 -1
+
+                if (r + this->k >= this->N) {
+
+                    targetIdx =
+                        static_cast<int64_t>(idx)
+                        + this->numDiag;
+
+                } else if (r + this->k > c) {
+
+                    targetIdx =
+                        static_cast<int64_t>(idx)
+                        + r;
+
+                } else if (r + this->k < c) {
+
+                    targetIdx =
+                        static_cast<int64_t>(idx)
+                        + r
+                        + 1;
+                }
+
+                // r + k == c：
+                // 不写，mask 保持 0。
             }
 
-            // 只有当计算出了有效的目标索引时，才进行写入
-            if (target_idx_long != -1 && 
-                target_idx_long >= (int64_t)this->start_tgt && 
-                target_idx_long < (int64_t)this->end_tgt) {
-                uint32_t local_offset = (uint32_t)(target_idx_long - this->start_tgt);
-                maskLocal.SetValue(local_offset, (int8_t)1);
+
+            // =================================================
+            // 当前 Core 按「输出 index 范围」负责写 mask。
+            //
+            // 只有 targetIdx 落到自己的输出区间才写。
+            //
+            // 这样：
+            //
+            // Core 0 -> [start0, end0)
+            // Core 1 -> [start1, end1)
+            // ...
+            //
+            // 每个边界都按 64B 对齐。
+            // =================================================
+
+            if (targetIdx >=
+                    static_cast<int64_t>(this->startTgt) &&
+                targetIdx <
+                    static_cast<int64_t>(this->endTgt) &&
+                targetIdx >= 0 &&
+                targetIdx <
+                    static_cast<int64_t>(this->outTotalLen)) {
+
+                maskGm.SetValue(
+                    static_cast<uint64_t>(targetIdx),
+                    static_cast<int8_t>(1));
             }
         }
 
-        inQueueRow.FreeTensor(rowLocal);
-        inQueueCol.FreeTensor(colLocal);
+
+        inQueueRow.FreeTensor(rowLocalByte);
+        inQueueCol.FreeTensor(colLocalByte);
     }
 
+
 private:
+
     TPipe pipe;
-    TQue<QuePosition::VECIN, BUFFER_NUM> inQueueRow, inQueueCol;
-    TBuf<QuePosition::VECOUT> maskBuf; // 添加用于输出的 UB 内存池
-    GlobalTensor<int64_t> rowGm, colGm;
+
+    // BUFFER_NUM = 1，固定约 64 KB UB。
+    TQue<QuePosition::VECIN, BUFFER_NUM> inQueueRow;
+    TQue<QuePosition::VECIN, BUFFER_NUM> inQueueCol;
+
+    // row/col 通过 byte 搬运。
+    GlobalTensor<uint8_t> rowGm;
+    GlobalTensor<uint8_t> colGm;
+
     GlobalTensor<int8_t> maskGm;
 
-    uint32_t start_tgt, end_tgt, min_idx;
-    uint32_t tileNum, tileDataNum, tailDataNum;
-    uint32_t align_32_len, align_256_len;
-    int64_t M, N, k, num_diag;
+
+    uint32_t startTgt;
+    uint32_t endTgt;
+
+    uint32_t minIdx;
+    uint32_t coreProcessLength;
+
+    uint32_t tileNum;
+    uint32_t tailDataNum;
+
     uint32_t totalLength;
+    uint32_t outTotalLen;
+
+    int64_t M;
+    int64_t N;
+    int64_t k;
+    int64_t numDiag;
 };
 
-extern "C" __global__ __aicore__ void non_diag_mask(GM_ADDR row, GM_ADDR col, GM_ADDR mask, GM_ADDR workspace, GM_ADDR tiling)
-{
-    // ... 此处的代码与你的原版完全一致，无需改动 ...
-    GET_TILING_DATA(tiling_data, tiling);
-    
-    uint32_t blockIdx = GetBlockIdx();
-    uint32_t coreNum = tiling_data.coreNum;
-    uint32_t outTotalLen = tiling_data.outTotalLen;
-    uint32_t totalLength = tiling_data.totalLength;
-    uint32_t max_diff = tiling_data.max_diff;
-    uint32_t tileDataNum = 4096;
-    
-    uint32_t outLengthPerCore = (outTotalLen + coreNum - 1) / coreNum;
-    outLengthPerCore = (outLengthPerCore + 31) / 32 * 32;
-    
-    uint32_t start_tgt = blockIdx * outLengthPerCore;
-    if (start_tgt >= outTotalLen) return;
-    
-    uint32_t end_tgt = start_tgt + outLengthPerCore;
-    if (end_tgt > outTotalLen) end_tgt = outTotalLen;
-    
-    uint32_t min_idx = (start_tgt > max_diff) ? (start_tgt - max_diff) : 0;
-    min_idx = (min_idx / 8) * 8;
-    
-    uint32_t max_idx = end_tgt + 32;
-    if (max_idx > totalLength) max_idx = totalLength;
 
-    if (min_idx >= max_idx) return;
-    uint32_t coreProcessLength = max_idx - min_idx;
-    
-    uint32_t tileNum = (coreProcessLength + tileDataNum - 1) / tileDataNum;
-    uint32_t tailDataNum = coreProcessLength % tileDataNum;
-    if (tailDataNum == 0) tailDataNum = tileDataNum;
-    
+// ============================================================
+// Kernel entry
+// ============================================================
+
+extern "C" __global__ __aicore__
+void non_diag_mask(
+    GM_ADDR row,
+    GM_ADDR col,
+    GM_ADDR mask,
+    GM_ADDR workspace,
+    GM_ADDR tiling)
+{
+    GET_TILING_DATA(tiling_data, tiling);
+
+
+    uint32_t blockIdx =
+        GetBlockIdx();
+
+    uint32_t coreNum =
+        tiling_data.coreNum;
+
+    uint32_t outTotalLen =
+        tiling_data.outTotalLen;
+
+    uint32_t totalLength =
+        tiling_data.totalLength;
+
+    uint32_t maxDiff =
+        tiling_data.max_diff;
+
+
+    // ========================================================
+    // 基础保护
+    // ========================================================
+
+    if (coreNum == 0 ||
+        blockIdx >= coreNum ||
+        outTotalLen == 0 ||
+        totalLength == 0) {
+        return;
+    }
+
+
+    // ========================================================
+    // 1. 按输出长度进行多核划分
+    //
+    // 必须按 64 Byte 对齐，而不是原来的 32 Byte。
+    //
+    // 原因不是 DataCopy，而是：
+    //
+    //     maskGm.SetValue()
+    //
+    // 属于 Scalar GM 写，使用 Data Cache。
+    // 一个 CacheLine = 64B。
+    //
+    // 不允许两个 Core 写同一 CacheLine。
+    // ========================================================
+
+    uint32_t outLengthPerCore =
+        (outTotalLen + coreNum - 1) /
+        coreNum;
+
+    outLengthPerCore =
+        (outLengthPerCore +
+         CACHE_LINE_BYTES - 1) /
+        CACHE_LINE_BYTES *
+        CACHE_LINE_BYTES;
+
+
+    uint32_t startTgt =
+        blockIdx * outLengthPerCore;
+
+    if (startTgt >= outTotalLen) {
+        return;
+    }
+
+
+    uint32_t endTgt =
+        startTgt + outLengthPerCore;
+
+    if (endTgt > outTotalLen) {
+        endTgt = outTotalLen;
+    }
+
+
+    // ========================================================
+    // 2. 确定当前 Core 需要检查的输入范围
+    //
+    // 保留你原 kernel 的 max_diff 思路。
+    //
+    // 对于某个目标输出区间：
+    //
+    //      [startTgt, endTgt)
+    //
+    // 只需要扫描可能映射到这个区间的 COO 输入。
+    // ========================================================
+
+    uint32_t minIdx =
+        (startTgt > maxDiff)
+            ? (startTgt - maxDiff)
+            : 0;
+
+
+    // 原代码的：
+    //
+    //     min_idx = (min_idx / 8) * 8
+    //
+    // 这里已经不需要。
+    //
+    // 因为使用 DataCopyPad 做非对齐输入搬运。
+
+
+    uint64_t maxIdx64 =
+        static_cast<uint64_t>(endTgt) + 32;
+
+    if (maxIdx64 >
+        static_cast<uint64_t>(totalLength)) {
+
+        maxIdx64 =
+            static_cast<uint64_t>(totalLength);
+    }
+
+    uint32_t maxIdx =
+        static_cast<uint32_t>(maxIdx64);
+
+
+    if (minIdx >= maxIdx) {
+        return;
+    }
+
+
+    uint32_t coreProcessLength =
+        maxIdx - minIdx;
+
+
+    // ========================================================
+    // 3. 输入 Tile 划分
+    // ========================================================
+
+    uint32_t tileNum =
+        (coreProcessLength +
+         TILE_DATA_NUM - 1) /
+        TILE_DATA_NUM;
+
+
+    uint32_t tailDataNum =
+        coreProcessLength %
+        TILE_DATA_NUM;
+
+
+    if (tailDataNum == 0) {
+        tailDataNum =
+            TILE_DATA_NUM;
+    }
+
+
+    // ========================================================
+    // 4. Kernel
+    // ========================================================
+
     KernelNonDiagMask op;
-    op.Init(row, col, mask,
-            start_tgt, end_tgt,
-            min_idx, coreProcessLength,
-            tileNum, tileDataNum, tailDataNum,
-            tiling_data.M, tiling_data.N, tiling_data.k, tiling_data.num_diag, totalLength);
+
+    op.Init(
+        row,
+        col,
+        mask,
+
+        startTgt,
+        endTgt,
+
+        minIdx,
+        coreProcessLength,
+
+        tileNum,
+        tailDataNum,
+
+        tiling_data.M,
+        tiling_data.N,
+        tiling_data.k,
+        tiling_data.num_diag,
+
+        totalLength,
+        outTotalLen);
+
+
     op.Process();
 }
